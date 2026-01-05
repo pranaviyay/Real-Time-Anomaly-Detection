@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+pandas
+pyyaml
+streamlit
+requests
+plotly
+streamlit-autorefresh
+scikit-learn
+numpy
+kafka-python
+faker
+xgboost

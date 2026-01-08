@@ -1,0 +1,47 @@
+[
+  {
+    "transaction_id": "bdb74af6-8377-4a34-85cd-5310cf7542c7",
+    "user_id": 104,
+    "amount": 116.7,
+    "location": "Delhi",
+    "merchant_category": "Clothing",
+    "timestamp": "2026-04-16T12:25:23",
+    "is_fraud": 0
+  },
+  {
+    "transaction_id": "7c432b92-38d9-4a7e-b887-fd31e2c343a3",
+    "user_id": 127,
+    "amount": 2347.15,
+    "location": "Pune",
+    "merchant_category": "Groceries",
+    "timestamp": "2026-04-16T14:49:16",
+    "is_fraud": 0
+  },
+  {
+    "transaction_id": "e9a6a3ef-7cd9-4568-8562-1d90e09f56e5",
+    "user_id": 65,
+    "amount": 281.16,
+    "location": "Pune",
+    "merchant_category": "Food",
+    "timestamp": "2026-04-16T15:19:55",
+    "is_fraud": 0
+  },
+  {
+    "transaction_id": "90721e14-64b6-4820-bf37-f75b37bf09b9",
+    "user_id": 145,
+    "amount": 6081.61,
+    "location": "Chennai",
+    "merchant_category": "Groceries",
+    "timestamp": "2026-04-16T20:58:51",
+    "is_fraud": 0
+  },
+  {
+    "transaction_id": "e8f694f7-c44c-4714-8226-0dd99dbf1ae0",
+    "user_id": 362,
+    "amount": 3646.63,
+    "location": "Bangalore",
+    "merchant_category": "Clothing",
+    "timestamp": "2026-04-16T09:43:55",
+    "is_fraud": 0
+  }
+]

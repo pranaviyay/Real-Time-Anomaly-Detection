@@ -1,8 +1,8 @@
-# Real-Time Fraud Detection System
+# Real-Time Anomaly Detection System
 
-An end-to-end real-time fraud detection system built on Apache Kafka, FastAPI, and XGBoost. Transactions stream through a Kafka pipeline, get scored by a trained ML model using stateful behavioural features, and flagged alerts appear live on a Streamlit dashboard.
+An end-to-end real-time Anomaly detection system built on Apache Kafka, FastAPI, and XGBoost. Transactions stream through a Kafka pipeline, get scored by a trained ML model using stateful behavioural features, and flagged alerts appear live on a Streamlit dashboard.
 
-The core idea behind this project was to move beyond static fraud detection — instead of training on fixed features like amount and location alone, the system maintains a rolling in-memory history per user and derives behavioural signals on every incoming transaction in real time.
+The core idea behind this project was to move beyond static anomaly detection — instead of training on fixed features like amount and location alone, the system maintains a rolling in-memory history per user and derives behavioural signals on every incoming transaction in real time.
 
 ---
 
@@ -142,7 +142,7 @@ Returns total transactions processed, fraud count, and fraud rate.
 ## Project Structure
 
 ```
-fraud-detection-system/
+anomaly-detection-system/
 │
 ├── api/
 │   ├── Dockerfile

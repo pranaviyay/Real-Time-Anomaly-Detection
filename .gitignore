@@ -26,7 +26,6 @@ model/feature_columns.json
 model/threshold.json
 model/label_encoder_classes.json
 model/location_encoder_classes.json
-model/test_indices.json
 model/evaluation_report.txt
 
 # Keep the logs dir but ignore its contents

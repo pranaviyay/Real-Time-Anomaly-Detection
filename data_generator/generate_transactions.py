@@ -65,7 +65,7 @@ def _normal_txn(rng: random.Random, user_id: int, home_city: str, home_category:
         category = rng.choice(FRAUD_BIASED_CATEGORIES)
 
     return {
-        "transaction_id": str(uuid.uuid4()),
+        "transaction_id": str(uuid.UUID(int=rng.getrandbits(128), version=4)),
         "user_id": user_id,
         "amount": amount,
         "location": location,
@@ -126,7 +126,7 @@ def _fraud_txn(rng: random.Random, user_id: int, home_city: str, home_category: 
 
     ts = _ts(base_date, day_offset, hour, minute, second)
     return {
-        "transaction_id": str(uuid.uuid4()),
+        "transaction_id": str(uuid.UUID(int=rng.getrandbits(128), version=4)),
         "user_id": user_id,
         "amount": amount,
         "location": location,

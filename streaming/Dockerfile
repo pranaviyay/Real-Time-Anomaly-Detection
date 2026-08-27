@@ -2,7 +2,6 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps for numpy/scikit-learn wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -10,15 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY api/ ./api/
 COPY streaming/ ./streaming/
 COPY model/ ./model/
 COPY configs/ ./configs/
 COPY data_generator/ ./data_generator/
 
-# Logs are written here at runtime
 RUN mkdir -p logs
 
-EXPOSE 8000
-
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# No CMD — docker-compose chooses producer or consumer per service

@@ -1,47 +1,47 @@
 [
   {
-    "transaction_id": "bdb74af6-8377-4a34-85cd-5310cf7542c7",
-    "user_id": 104,
-    "amount": 116.7,
-    "location": "Delhi",
-    "merchant_category": "Clothing",
-    "timestamp": "2026-04-16T12:25:23",
-    "is_fraud": 0
-  },
-  {
-    "transaction_id": "7c432b92-38d9-4a7e-b887-fd31e2c343a3",
-    "user_id": 127,
-    "amount": 2347.15,
-    "location": "Pune",
-    "merchant_category": "Groceries",
-    "timestamp": "2026-04-16T14:49:16",
-    "is_fraud": 0
-  },
-  {
-    "transaction_id": "e9a6a3ef-7cd9-4568-8562-1d90e09f56e5",
-    "user_id": 65,
-    "amount": 281.16,
-    "location": "Pune",
-    "merchant_category": "Food",
-    "timestamp": "2026-04-16T15:19:55",
-    "is_fraud": 0
-  },
-  {
-    "transaction_id": "90721e14-64b6-4820-bf37-f75b37bf09b9",
-    "user_id": 145,
-    "amount": 6081.61,
-    "location": "Chennai",
-    "merchant_category": "Groceries",
-    "timestamp": "2026-04-16T20:58:51",
-    "is_fraud": 0
-  },
-  {
-    "transaction_id": "e8f694f7-c44c-4714-8226-0dd99dbf1ae0",
-    "user_id": 362,
-    "amount": 3646.63,
+    "transaction_id": "1b98abf1-f88d-4cc1-a8c2-bd7c438db876",
+    "user_id": 410,
+    "amount": 1271.05,
     "location": "Bangalore",
-    "merchant_category": "Clothing",
-    "timestamp": "2026-04-16T09:43:55",
+    "merchant_category": "Electronics",
+    "timestamp": "2026-01-01 01:25:53",
+    "is_fraud": 1
+  },
+  {
+    "transaction_id": "c01f28d6-8b16-4f3b-8895-0c60077224d6",
+    "user_id": 384,
+    "amount": 10357.88,
+    "location": "Pune",
+    "merchant_category": "Groceries",
+    "timestamp": "2026-01-01 01:38:33",
+    "is_fraud": 0
+  },
+  {
+    "transaction_id": "adff0de5-b6d7-4561-9004-42d978fec66c",
+    "user_id": 301,
+    "amount": 2941.72,
+    "location": "Mumbai",
+    "merchant_category": "Utilities",
+    "timestamp": "2026-01-01 02:52:24",
+    "is_fraud": 1
+  },
+  {
+    "transaction_id": "f55a4709-74ec-4639-89ea-7b53ef00d739",
+    "user_id": 131,
+    "amount": 6981.9,
+    "location": "Chennai",
+    "merchant_category": "Travel",
+    "timestamp": "2026-01-01 05:44:04",
+    "is_fraud": 0
+  },
+  {
+    "transaction_id": "45d5ac1c-a6c2-4ea8-bd2b-3dd8a1ef8a7d",
+    "user_id": 112,
+    "amount": 8191.72,
+    "location": "Jaipur",
+    "merchant_category": "Food",
+    "timestamp": "2026-01-01 07:26:49",
     "is_fraud": 0
   }
 ]

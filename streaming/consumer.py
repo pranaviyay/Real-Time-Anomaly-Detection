@@ -1,91 +1,89 @@
+"""
+Kafka consumer for streaming transactions.
+
+Forwards every transaction to the API's /ingest endpoint. The API owns the
+FeatureStore, the model, the threshold, the alert log, and the running
+counters — single source of truth. The consumer's job is now just bridging
+Kafka to HTTP and surfacing per-transaction decisions to stdout.
+
+This replaces the previous design where the consumer scored locally with its
+own FeatureStore, which produced a duplicate state machine that disagreed
+with the API's view (most visibly: the dashboard's "Total Transactions"
+counter was always 0 because the API never saw streaming traffic).
+"""
+
+from __future__ import annotations
+
 import os
-import csv
+import sys
 import json
-import pickle
+import time
+import argparse
+
+import requests
 import yaml
-import pandas as pd
-import random
 from kafka import KafkaConsumer
-from feature_store import FeatureStore
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
 
-with open(os.path.join(BASE_DIR, "configs", "config.yaml")) as f:
-    config = yaml.safe_load(f)
 
-with open(os.path.join(BASE_DIR, "model", "model.pkl"), "rb") as f:
-    model = pickle.load(f)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=os.path.join(BASE_DIR, "configs/config.yaml"))
+    args = parser.parse_args()
 
-with open(os.path.join(BASE_DIR, "model", "feature_columns.json")) as f:
-    FEATURES = json.load(f)
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
 
-with open(os.path.join(BASE_DIR, "model", "threshold.json")) as f:
-    THRESHOLD = json.load(f)["threshold"]
+    bootstrap = os.getenv("KAFKA_BOOTSTRAP", cfg["kafka"]["bootstrap_servers"])
+    topic = cfg["kafka"]["topic"]
+    group_id = cfg["kafka"]["group_id"]
+    api_base = os.getenv("API_BASE", "http://backend:8000")
 
-with open(os.path.join(BASE_DIR, "model", "label_encoder_classes.json")) as f:
-    cat_classes = json.load(f)
+    print(f"Consumer → kafka={bootstrap}, topic={topic}, api={api_base}")
 
-with open(os.path.join(BASE_DIR, "model", "location_encoder_classes.json")) as f:
-    loc_classes = json.load(f)
+    # Wait for the API to come up. /health is cheap and idempotent.
+    for attempt in range(30):
+        try:
+            r = requests.get(f"{api_base}/health", timeout=2)
+            if r.ok:
+                print(f"API healthy after {attempt} attempts.")
+                break
+        except Exception:
+            pass
+        time.sleep(2)
+    else:
+        print("API never came up; consumer exiting.", file=sys.stderr)
+        sys.exit(1)
 
-print(f"Model loaded | Threshold: {THRESHOLD:.2f}")
-print("Fraud consumer started...\n")
-
-feature_store = FeatureStore()
-
-consumer = KafkaConsumer(
-    config["kafka"]["topic"],
-    bootstrap_servers=config["kafka"]["bootstrap_servers"],
-    value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-    auto_offset_reset="latest"
-)
-
-for message in consumer:
-    txn = message.value
-
-    category = txn.get("merchant_category", "Groceries")
-    cat_encoded = cat_classes.index(category) if category in cat_classes else 0
-
-    location = txn.get("location", "Unknown")
-    loc_encoded = loc_classes.index(location) if location in loc_classes else 0
-
-    features = feature_store.compute_features(txn)
-    features["merchant_category_encoded"] = cat_encoded
-    features["location_encoded"] = loc_encoded
-
-    X = pd.DataFrame([{col: features.get(col, 0) for col in FEATURES}])
-
-    raw_score = float(model.predict_proba(X)[0][1])
-    score = max(0.0, min(raw_score + random.uniform(-0.05, 0.05), 1.0))
-    is_fraud = int(score >= THRESHOLD)
-
-    flag = "🚨 FRAUD" if is_fraud else "✅ OK"
-
-    print(
-        f"{flag} | User {txn['user_id']} | ₹{txn['amount']:>10.2f} | "
-        f"{txn['location']:<12} | Score: {score:.3f}"
+    consumer = KafkaConsumer(
+        topic,
+        bootstrap_servers=bootstrap,
+        group_id=group_id,
+        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+        auto_offset_reset="latest",
     )
 
-    print(f"Decision | score={score:.3f} | threshold={THRESHOLD:.3f} | fraud={is_fraud}")
+    session = requests.Session()
+    print("Forwarding transactions to /ingest...\n")
 
-    if is_fraud:
-        log_path = os.path.join(BASE_DIR, "logs", "fraud_alerts.csv")
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        file_exists = os.path.isfile(log_path)
+    for message in consumer:
+        txn = message.value
+        try:
+            resp = session.post(f"{api_base}/ingest", json=txn, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"!! ingest failed for {txn.get('transaction_id', '?')}: {e}", file=sys.stderr)
+            continue
 
-        with open(log_path, "a", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=["transaction_id", "user_id", "amount", "location", "fraud_score", "timestamp"]
-            )
-            if not file_exists:
-                writer.writeheader()
+        is_fraud = data["is_fraud"]
+        marker = "🚨" if is_fraud else "✓ "
+        print(f"{marker} user={txn['user_id']:>3}  ₹{txn['amount']:>10,.2f}  "
+              f"{txn['location']:<12}  score={data['fraud_score']:.3f}  "
+              f"decision={data['flag']}")
 
-            writer.writerow({
-                "transaction_id": txn["transaction_id"],
-                "user_id": txn["user_id"],
-                "amount": txn["amount"],
-                "location": txn["location"],
-                "fraud_score": round(score, 3),
-                "timestamp": txn["timestamp"]
-            })
+
+if __name__ == "__main__":
+    main()

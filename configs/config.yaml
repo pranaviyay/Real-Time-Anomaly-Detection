@@ -1,4 +1,27 @@
 kafka:
-  bootstrap_servers: "localhost:9092"
+  bootstrap_servers: "kafka:9092"     # inside docker-compose network; override to localhost:9092 when running locally
   topic: "transactions"
-  group_id: "fraud-detection-group"
+  group_id: "anomaly-detection-group"
+
+paths:
+  data_csv: "data_generator/transactions.csv"
+  model_pkl: "model/model.pkl"
+  feature_columns: "model/feature_columns.json"
+  threshold: "model/threshold.json"
+  label_encoder: "model/label_encoder_classes.json"
+  location_encoder: "model/location_encoder_classes.json"
+  test_indices: "model/test_indices.json"
+  fraud_log: "logs/fraud_alerts.csv"
+
+data:
+  n_transactions: 5000
+  n_users: 500
+  fraud_rate: 0.10
+  random_seed: 42
+
+training:
+  random_seed: 42
+  validation_size: 0.2
+  test_size: 0.2
+  min_precision_floor: 0.30
+  fbeta: 2.0

@@ -1,18 +1,89 @@
 services:
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: anomaly-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft mode (no Zookeeper). Single combined broker+controller node.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Single-node defaults
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Cluster ID for KRaft (any base64-encoded 16-byte UUID works)
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
   backend:
     build:
       context: .
       dockerfile: api/Dockerfile
+    container_name: anomaly-backend
     ports:
       - "8000:8000"
+    volumes:
+      - ./logs:/app/logs   # share fraud_alerts.csv with the consumer
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   dashboard:
     build:
       context: .
       dockerfile: dashboard/Dockerfile
+    container_name: anomaly-dashboard
     ports:
       - "8501:8501"
     environment:
       - API_BASE=http://backend:8000
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+
+  producer:
+    build:
+      context: .
+      dockerfile: streaming/Dockerfile
+    container_name: anomaly-producer
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - PYTHONPATH=/app
+    command: ["python", "-m", "streaming.producer", "--rate", "1.0"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: .
+      dockerfile: streaming/Dockerfile
+    container_name: anomaly-consumer
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - API_BASE=http://backend:8000
+      - PYTHONPATH=/app
+    command: ["python", "-m", "streaming.consumer"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

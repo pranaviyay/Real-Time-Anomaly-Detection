@@ -1,112 +1,106 @@
-# Real-Time Anomaly Detection System
+# Anomaly Detection — Real-Time Transaction Fraud System
 
-An end-to-end real-time Anomaly detection system built on Apache Kafka, FastAPI, and XGBoost. Transactions stream through a Kafka pipeline, get scored by a trained ML model using stateful behavioural features, and flagged alerts appear live on a Streamlit dashboard.
+End-to-end real-time fraud detection. Transactions stream through Kafka, get scored by a calibrated gradient-boosted model using stateful per-user behavioural features, and flagged alerts appear live on a Streamlit dashboard.
 
-The core idea behind this project was to move beyond static anomaly detection — instead of training on fixed features like amount and location alone, the system maintains a rolling in-memory history per user and derives behavioural signals on every incoming transaction in real time.
+The design choice that drives the project: instead of training on raw transaction fields (amount, location, category alone), the system maintains an **in-memory rolling history per user** and derives 26 behavioural signals on every incoming transaction. The same feature store is used at training time and at inference time — no train/serve skew.
 
 ---
 
 ## Architecture
 
 ```
-Data Generator
-      │
-      ▼
-Kafka Producer ──────────────► Kafka Topic (transactions)
-                                        │
-                                        ▼
-                                Kafka Consumer
-                                        │
-                                Stateful Feature Store
-                                (27 behavioural features,
-                                 computed per user in real time)
-                                        │
-                                XGBoost Model (threshold: 0.336)
-                                        │
-                          ┌─────────────┴─────────────┐
-                          ▼                           ▼
-                  logs/fraud_alerts.csv          FastAPI /predict
-                                                      │
-                                             Streamlit Dashboard
+Generator ──► Kafka producer ──► Kafka topic ──► Kafka consumer
+                                                       │
+                                                       ▼
+                                        Stateful feature store
+                                        (26 behavioural features
+                                         computed per user, online)
+                                                       │
+                                                       ▼
+                              HistGradientBoostingClassifier + isotonic calibration
+                                                       │
+                                  ┌────────────────────┴────────────────────┐
+                                  ▼                                         ▼
+                        logs/fraud_alerts.csv                       FastAPI /predict
+                                                                            │
+                                                                            ▼
+                                                                Streamlit dashboard
+                                                                (KPI cards, time series,
+                                                                 alerts by location)
 ```
 
 ---
 
-## Behavioural Features (27 total)
+## Held-out test results
 
-All features are derived in real time from the user's rolling transaction history — no batch jobs, no pre-aggregation:
+Computed on a stratified 20% test split that the model never sees during training, calibration, or threshold tuning. `evaluate.py` reproduces these numbers exactly using indices saved by `train_model.py`.
+
+| Metric                | Value  |
+|-----------------------|--------|
+| AUC-ROC               | **0.9516** |
+| Average precision (PR)| **0.8482** |
+| Precision (fraud)     | 0.5762 |
+| Recall (fraud)        | **0.8700** |
+| F1 (fraud)            | 0.6932 |
+| Decision threshold    | 0.1227 |
+
+The threshold is tuned on the validation set with **F-beta (β=2, recall-weighted)** under a precision floor of 0.30. In a fraud context, missing genuine fraud is much costlier than flagging a legitimate transaction for review, so recall is the primary objective.
+
+---
+
+## Behavioural features (26 total)
+
+All features are computed from the user's prior history; the current transaction never contributes to its own statistics. Users with no history get NaN for behavioural features and an `is_new_user=1` flag — the gradient-boosted model handles NaN natively, so we don't have to lie with imputed zeros.
 
 **Velocity & timing**
-- Transaction count in last 5 min, 30 min, 1 hr, 24 hr
-- Transaction velocity (count / time since last txn)
-- Time since last transaction
-- Burst flag (>5 transactions in last hour)
+- `txn_count_last_5min`, `txn_count_last_30min`, `txn_count_last_1hr`, `txn_count_last_24hr`
+- `txn_velocity` (txns per minute over the 5-minute lookback)
+- `time_since_last_txn` (NaN for first txn)
+- `txn_burst_flag` (>5 txns in last hour)
 
 **Amount patterns**
-- Rolling average and std dev of last 10 transactions
-- Amount deviation from personal baseline
-- Amount z-score
-- Amount spike flag (>2x personal average)
-- Amount ratio relative to recent history
-- Recent high-amount ratio
-- User-level risk score (lifetime high-amount frequency)
+- `avg_amount_last_10`, `amount_std_last_10`, `user_avg_amount`
+- `amount_deviation`, `amount_zscore`
+- `amount_spike_flag` (>2× recent average)
+- `amount_ratio_last_10`, `recent_high_amount_ratio`
+- `user_risk_score` (lifetime fraction of above-average txns)
 
 **Location & merchant behaviour**
-- Location change flag
-- Location frequency and rarity for this user
-- Location switch count in 24 hrs
-- Merchant category frequency and rarity
-- Merchant switch count in 24 hrs
-- Encoded location and merchant category
+- `location_change_flag`, `location_frequency`, `location_rarity`
+- `location_switch_count_24hr`
+- `merchant_frequency`, `merchant_rarity`, `merchant_switch_count_24hr`
+- `merchant_category_encoded`, `location_encoded` (with a reserved `0` slot for unseen categories)
+
+Plus `amount`, `hour`, and `is_new_user`.
 
 ---
 
-## Model
+## Synthetic data
 
-**Algorithm:** `HistGradientBoostingClassifier` with isotonic probability calibration (`CalibratedClassifierCV`)
+The generator produces 5,000 transactions across 500 users over 90 days, with a 10% fraud rate. Five fraud patterns are simulated:
 
-**Training pipeline:**
-- 5,000 synthetic transactions with a 10% fraud rate
-- Stratified 60/20/20 train/val/test split
-- `GridSearchCV` over depth, learning rate, iterations, min samples leaf, and L2 regularisation
-- Threshold tuned on validation set using F2-score (recall-weighted) with a minimum precision floor of 0.30
+| Pattern         | Description |
+|-----------------|-------------|
+| `amount_spike`  | Large transaction unusual for the user |
+| `location_shift`| Transaction outside the user's home/cluster cities |
+| `velocity`      | Multiple transactions inside a 1-hour window |
+| `merchant_shift`| Switch to high-risk categories (Electronics, Travel, Utilities) |
+| `mixed`         | Combination of the above |
 
-**Results on held-out test set:**
+Fraud and normal distributions overlap — small-amount fraud, home-city fraud, occasional large legit purchases, occasional category drift for genuine users. This forces the model to learn from feature combinations rather than memorise threshold cutoffs.
 
-| Metric | Value |
-|--------|-------|
-| AUC-ROC | **0.88** |
-| Precision (fraud class) | 0.16 |
-| Recall (fraud class) | **0.91** |
-| F1 (fraud class) | 0.28 |
-| Decision threshold | 0.336 |
-
-The low precision is a deliberate tradeoff — the threshold is tuned to maximise recall (catching 91% of actual fraud) at the cost of more false positives. In a real fraud detection context, missing genuine fraud is far more costly than flagging a legitimate transaction for manual review.
+Reproducible from a single seed in `configs/config.yaml`.
 
 ---
 
-## Fraud Patterns in Synthetic Data
+## API
 
-The data generator simulates five distinct fraud patterns to train on realistic signals:
-
-| Pattern | Description |
-|---------|-------------|
-| Amount spike | Single very large transaction, unusual for that user |
-| Location shift | Transaction from a city outside the user's home cluster |
-| Velocity burst | Multiple transactions in a short window, often late at night |
-| Merchant shift | Sudden switch to high-risk categories (Electronics, Travel, Utilities) |
-| Mixed | Combination of the above signals |
-
-Each pattern includes 15% noise (reverting to normal behaviour) to prevent the model from learning overly clean boundaries.
-
----
-
-## API Endpoints
+### `GET /` and `/health`
+Service info and liveness.
 
 ### `POST /predict`
-Score an incoming transaction in real time.
+Score one transaction.
 
-**Request:**
 ```json
 {
   "transaction_id": "abc-123",
@@ -118,7 +112,7 @@ Score an incoming transaction in real time.
 }
 ```
 
-**Response:**
+Response:
 ```json
 {
   "transaction_id": "abc-123",
@@ -127,115 +121,138 @@ Score an incoming transaction in real time.
   "location": "Mumbai",
   "fraud_score": 0.847,
   "is_fraud": 1,
-  "flag": "FRAUD"
+  "flag": "FRAUD",
+  "threshold": 0.1227
 }
 ```
 
-### `GET /alerts`
-Returns all logged fraud alerts from `logs/fraud_alerts.csv`.
+### `GET /alerts?limit=500`
+Most-recent fraud alerts from `logs/fraud_alerts.csv`.
 
 ### `GET /stats`
-Returns total transactions processed, fraud count, and fraud rate.
+```json
+{
+  "total_transactions": 1234,
+  "fraud_detected": 87,
+  "fraud_rate": 0.0705,
+  "fraud_score_avg": 0.7241,
+  "threshold": 0.1227
+}
+```
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
-anomaly-detection-system/
-│
+anomaly-detection/
 ├── api/
 │   ├── Dockerfile
-│   └── main.py               # FastAPI: /predict, /alerts, /stats
-│
+│   └── main.py                # FastAPI: /predict, /alerts, /stats, /health
 ├── configs/
-│   └── config.yaml           # Kafka bootstrap server, topic, group ID
-│
+│   └── config.yaml            # Kafka, paths, data, training params
 ├── dashboard/
 │   ├── Dockerfile
-│   └── streamlit_app.py      # Live monitoring: KPI cards, time series, location chart
-│
+│   └── streamlit_app.py       # KPIs, time series, location chart, alerts table
 ├── data_generator/
-│   ├── __init__.py
-│   ├── generate_transactions.py   # Synthetic data with 5 fraud patterns
-│   ├── transactions.csv           # 5,000 generated transactions
-│   └── transactions.json          # Sample records (first 5)
-│
+│   ├── generate_transactions.py   # Reproducible synthetic data, 5 fraud patterns
+│   ├── transactions.csv
+│   └── transactions.json          # Sample of first 5
 ├── model/
-│   ├── train_model.py             # GridSearchCV + calibration + threshold tuning
-│   ├── evaluate.py                # Evaluation script on held-out test set
-│   ├── evaluation_report.txt      # Classification report + AUC
-│   ├── model.pkl                  # Trained calibrated model
-│   ├── feature_columns.json       # Feature order for inference
-│   ├── label_encoder_classes.json # Merchant category classes
+│   ├── train_model.py             # Features → CV → calibration → threshold tuning
+│   ├── evaluate.py                # Held-out test using saved indices
+│   ├── evaluation_report.txt
+│   ├── model.pkl
+│   ├── feature_columns.json
+│   ├── label_encoder_classes.json
 │   ├── location_encoder_classes.json
-│   └── threshold.json             # Tuned decision threshold (0.336)
-│
+│   ├── test_indices.json          # Persisted test split for reproducible eval
+│   └── threshold.json
 ├── streaming/
-│   ├── feature_store.py      # Stateful per-user feature computation
-│   ├── producer.py           # Kafka producer: streams synthetic transactions
-│   └── consumer.py           # Kafka consumer: features → model → fraud logging
-│
+│   ├── Dockerfile                 # Shared image for producer & consumer
+│   ├── feature_store.py           # Stateful per-user features (NaN-aware)
+│   ├── producer.py                # Streams synthetic transactions to Kafka
+│   └── consumer.py                # Scores transactions, logs fraud alerts
+├── tests/
+│   ├── test_feature_store.py
+│   └── test_data_generator.py
 ├── logs/
-│   └── fraud_alerts.csv      # Appended by consumer and API on fraud detection
-│
-├── docker-compose.yml        # Spins up API + dashboard together
+│   └── fraud_alerts.csv
+├── docker-compose.yml             # Kafka (KRaft) + backend + dashboard + producer + consumer
 ├── .dockerignore
+├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## Running the Project
+## Running it
 
-### Option 1 — Docker (API + Dashboard only)
+### One command — full pipeline (Docker)
 
 ```bash
-git clone https://github.com/pranaviyay/Real-Time-Anomaly-Detection
-cd Real-Time-Anomaly-Detection
-docker-compose up --build
+git clone <your-repo>
+cd anomaly-detection
+
+# 1) Generate data and train the model (host-side, one-off)
+pip install -r requirements.txt
+python -m data_generator.generate_transactions
+python -m model.train_model
+
+# 2) Bring up Kafka + producer + consumer + API + dashboard
+docker compose up --build
 ```
 
-- API docs: `http://localhost:8000/docs`
-- Dashboard: `http://localhost:8501`
+- API:        http://localhost:8000/docs
+- Dashboard:  http://localhost:8501
 
-### Option 2 — Full Kafka Pipeline
+The producer streams ~1 transaction/second with a 10% fraud rate. The consumer scores each one and appends fraud alerts to `logs/fraud_alerts.csv`, which is shared with the API container via a bind mount.
 
-**1. Generate data and train the model:**
+### Without Docker (everything local)
+
+Requires a local Kafka broker on `localhost:9092`.
+
 ```bash
-python data_generator/generate_transactions.py
-python model/train_model.py
-```
+pip install -r requirements.txt
+python -m data_generator.generate_transactions
+python -m model.train_model
 
-**2. Start Kafka** (must be running locally on `localhost:9092`)
-
-**3. Start the producer and consumer in separate terminals:**
-```bash
-python streaming/producer.py
-python streaming/consumer.py
-```
-
-**4. Start the API:**
-```bash
+# In separate terminals:
+KAFKA_BOOTSTRAP=localhost:9092 python -m streaming.producer
+KAFKA_BOOTSTRAP=localhost:9092 python -m streaming.consumer
 uvicorn api.main:app --reload
+streamlit run dashboard/streamlit_app.py
 ```
 
-**5. Launch the dashboard:**
+### Tests
+
 ```bash
-streamlit run dashboard/streamlit_app.py
+pip install pytest
+pytest tests/ -v
 ```
 
 ---
 
-## Tech Stack
+## Modelling choices
 
-| Layer | Technology |
-|-------|-----------|
-| Streaming | Apache Kafka |
-| ML Model | XGBoost / HistGradientBoosting + Calibration |
-| Feature Engineering | Custom stateful Python (in-memory per-user history) |
-| Backend API | FastAPI |
-| Dashboard | Streamlit + Plotly |
-| Containerisation | Docker + Docker Compose |
-| Data Generation | Faker (en_IN locale) |
+**Why HistGradientBoostingClassifier?** Native NaN support (the new-user features are genuinely undefined, not zero), strong on tabular data, fast to train. No need for the heavier XGBoost dependency for a model of this size.
+
+**Why isotonic calibration?** The raw boosted-tree probabilities are not well-calibrated; isotonic regression on a held-out fold makes the score interpretable as a probability, so threshold tuning becomes principled.
+
+**Why F-beta with β=2?** Fraud detection is asymmetric: a missed fraud costs much more than a false alert. β=2 weights recall four times more than precision in the harmonic mean. The precision floor (0.30) prevents the optimum from collapsing to "flag everything".
+
+**Why save the test indices?** It guarantees that `evaluate.py` reports on the same examples the model was held out from during training, calibration, *and* threshold tuning. This was a real bug in an earlier version of this project — the evaluation script was scoring a different set of rows than the test set, including rows that had been in training, which inflated the reported metrics.
+
+---
+
+## Tech stack
+
+| Layer              | Tech |
+|--------------------|------|
+| Streaming          | Apache Kafka (KRaft mode, single node) |
+| Model              | scikit-learn HistGradientBoostingClassifier + isotonic calibration |
+| Feature engineering| Custom stateful Python (in-memory per-user history) |
+| Backend API        | FastAPI + Pydantic v2 |
+| Dashboard          | Streamlit + Plotly |
+| Containerisation   | Docker + Docker Compose |

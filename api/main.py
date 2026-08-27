@@ -1,127 +1,255 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""
+FastAPI service for the anomaly-detection model.
 
+Endpoints
+---------
+- GET  /         service info
+- GET  /health   liveness probe
+- POST /predict  score a single transaction (ad-hoc; logs alerts; updates state)
+- POST /ingest   bulk endpoint used by the streaming consumer; same scoring,
+                 returns the score so the consumer can log per-transaction
+- GET  /alerts   recent fraud alerts (paginated)
+- GET  /stats    counters + threshold + score distribution metrics
+- GET  /score-history  recent scores for the dashboard's time-series chart
+
+Single source of truth: this process owns the FeatureStore, the running
+counters, and the alert log. The streaming consumer no longer scores locally —
+it forwards each transaction to /ingest. That fixes the previous problem where
+"Total Transactions" was always 0 (the API and consumer had separate state).
+"""
+
+from __future__ import annotations
+
+import os
+import csv
 import json
 import pickle
-import yaml
-import csv
-import pandas as pd
-from fastapi import FastAPI
-from pydantic import BaseModel
+import sys
+import threading
+from collections import deque
 from typing import Optional
-from streaming.feature_store import FeatureStore
 
-with open("configs/config.yaml") as f:
-    config = yaml.safe_load(f)
+import numpy as np
+import pandas as pd
+import yaml
+from fastapi import FastAPI, Query
+from pydantic import BaseModel, Field
 
-with open("model/model.pkl", "rb") as f:
-    model = pickle.load(f)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
 
-with open("model/feature_columns.json") as f:
+from streaming.feature_store import FeatureStore  # noqa: E402
+
+CONFIG_PATH = os.environ.get("CONFIG_PATH", os.path.join(BASE_DIR, "configs/config.yaml"))
+with open(CONFIG_PATH) as f:
+    CFG = yaml.safe_load(f)
+
+MODEL_PATH = os.path.join(BASE_DIR, CFG["paths"]["model_pkl"])
+FEATURES_PATH = os.path.join(BASE_DIR, CFG["paths"]["feature_columns"])
+THRESHOLD_PATH = os.path.join(BASE_DIR, CFG["paths"]["threshold"])
+CAT_PATH = os.path.join(BASE_DIR, CFG["paths"]["label_encoder"])
+LOC_PATH = os.path.join(BASE_DIR, CFG["paths"]["location_encoder"])
+LOG_PATH = os.path.join(BASE_DIR, CFG["paths"]["fraud_log"])
+
+with open(MODEL_PATH, "rb") as f:
+    MODEL = pickle.load(f)
+with open(FEATURES_PATH) as f:
     FEATURES = json.load(f)
+with open(THRESHOLD_PATH) as f:
+    THRESHOLD = float(json.load(f)["threshold"])
+with open(CAT_PATH) as f:
+    CAT_CLASSES = json.load(f)
+with open(LOC_PATH) as f:
+    LOC_CLASSES = json.load(f)
 
-with open("model/threshold.json") as f:
-    THRESHOLD = json.load(f)["threshold"]
+CAT_LOOKUP = {c: i for i, c in enumerate(CAT_CLASSES)}
+LOC_LOOKUP = {c: i for i, c in enumerate(LOC_CLASSES)}
 
-with open("model/label_encoder_classes.json") as f:
-    le_classes = json.load(f)
+ALERT_FIELDS = [
+    "transaction_id", "user_id", "amount", "location",
+    "fraud_score", "is_fraud", "flag", "timestamp",
+]
 
+os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+
+# ── runtime state (protected by a lock; FastAPI workers are single-process by default with uvicorn) ──
+_lock = threading.Lock()
 feature_store = FeatureStore()
-app = FastAPI(title="Fraud Detection API", version="1.0")
+score_history: deque = deque(maxlen=500)   # recent (timestamp, score, is_fraud) for the chart
+fraud_count = 0
+score_sum = 0.0  # sum over ALL transactions, not just fraud — for honest avg score
+
+
+def _bootstrap_fraud_count_from_csv() -> None:
+    """If the alerts CSV already has rows from a previous run, pick up the count."""
+    global fraud_count
+    if os.path.isfile(LOG_PATH):
+        try:
+            with open(LOG_PATH) as f:
+                fraud_count = sum(1 for _ in csv.DictReader(f))
+        except Exception:
+            fraud_count = 0
+
+
+_bootstrap_fraud_count_from_csv()
+
+app = FastAPI(title="Anomaly Detection API", version="2.1")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Schemas
+# ──────────────────────────────────────────────────────────────────────────
 
 class Transaction(BaseModel):
     transaction_id: str
     user_id: int
-    amount: float
+    amount: float = Field(..., gt=0)
     location: str
     merchant_category: Optional[str] = "Groceries"
     timestamp: str
     is_fraud: Optional[int] = 0
 
-@app.get("/")
-def root():
-    return {"message": "Fraud Detection API is running"}
 
-@app.post("/predict")
-def predict(txn: Transaction):
-    txn_dict = txn.dict()
+class PredictionResponse(BaseModel):
+    transaction_id: str
+    user_id: int
+    amount: float
+    location: str
+    fraud_score: float
+    is_fraud: int
+    flag: str
+    threshold: float
 
-    category = txn_dict.get("merchant_category", "Groceries")
-    encoded = le_classes.index(category) if category in le_classes else 0
-    txn_dict["merchant_category_encoded"] = encoded
+
+# ──────────────────────────────────────────────────────────────────────────
+# Internal: scoring + state update
+# ──────────────────────────────────────────────────────────────────────────
+
+def _score_and_update(txn_dict: dict) -> tuple[float, int, str]:
+    """Compute features, score, update counters/history/log under the lock."""
+    global fraud_count, score_sum
 
     features = feature_store.compute_features(txn_dict)
-    features["merchant_category_encoded"] = encoded
+    features["merchant_category_encoded"] = CAT_LOOKUP.get(
+        txn_dict.get("merchant_category", "Groceries"), 0,
+    )
+    features["location_encoded"] = LOC_LOOKUP.get(txn_dict["location"], 0)
 
-    X = pd.DataFrame([{col: features.get(col, 0) for col in FEATURES}])
+    row = {col: features.get(col, np.nan) for col in FEATURES}
+    X = pd.DataFrame([row])
 
-    fraud_prob = float(model.predict_proba(X)[0][1])
-    is_fraud = int(fraud_prob >= THRESHOLD)
+    score = float(MODEL.predict_proba(X)[0][1])
+    is_fraud = int(score >= THRESHOLD)
+    flag = "FRAUD" if is_fraud else "OK"
+
+    score_sum += score
+    score_history.append({
+        "timestamp": txn_dict["timestamp"],
+        "score": round(score, 4),
+        "is_fraud": is_fraud,
+        "user_id": txn_dict["user_id"],
+        "amount": txn_dict["amount"],
+        "location": txn_dict["location"],
+    })
 
     if is_fraud:
-        log_path = "logs/fraud_alerts.csv"
-        os.makedirs("logs", exist_ok=True)
-        file_exists = os.path.isfile(log_path)
-
-        with open(log_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                "transaction_id", "user_id", "amount", "location",
-                "fraud_score", "is_fraud", "flag", "timestamp"
-            ])
-
+        fraud_count += 1
+        file_exists = os.path.isfile(LOG_PATH)
+        with open(LOG_PATH, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=ALERT_FIELDS)
             if not file_exists:
                 writer.writeheader()
-
             writer.writerow({
                 "transaction_id": txn_dict["transaction_id"],
                 "user_id": txn_dict["user_id"],
                 "amount": txn_dict["amount"],
                 "location": txn_dict["location"],
-                "fraud_score": round(fraud_prob, 3),
+                "fraud_score": round(score, 4),
                 "is_fraud": is_fraud,
-                "flag": "FRAUD",
-                "timestamp": txn_dict["timestamp"]
+                "flag": flag,
+                "timestamp": txn_dict["timestamp"],
             })
 
+    return score, is_fraud, flag
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Endpoints
+# ──────────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def root():
     return {
-        "transaction_id": txn_dict["transaction_id"],
-        "user_id": txn_dict["user_id"],
-        "amount": txn_dict["amount"],
-        "location": txn_dict["location"],
-        "fraud_score": round(fraud_prob, 3),
-        "is_fraud": is_fraud,
-        "flag": "FRAUD" if is_fraud else "OK"
+        "service": "anomaly-detection-api",
+        "version": "2.1",
+        "model_loaded": True,
+        "threshold": round(THRESHOLD, 4),
+        "n_features": len(FEATURES),
     }
 
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/predict", response_model=PredictionResponse)
+def predict(txn: Transaction) -> PredictionResponse:
+    txn_dict = txn.model_dump()
+    with _lock:
+        score, is_fraud, flag = _score_and_update(txn_dict)
+    return PredictionResponse(
+        transaction_id=txn_dict["transaction_id"],
+        user_id=txn_dict["user_id"],
+        amount=txn_dict["amount"],
+        location=txn_dict["location"],
+        fraud_score=round(score, 4),
+        is_fraud=is_fraud,
+        flag=flag,
+        threshold=round(THRESHOLD, 4),
+    )
+
+
+@app.post("/ingest", response_model=PredictionResponse)
+def ingest(txn: Transaction) -> PredictionResponse:
+    """Same as /predict; named distinctly so streaming traffic is observable
+    in metrics/logs separately from ad-hoc API calls."""
+    return predict(txn)
+
+
 @app.get("/alerts")
-def get_alerts():
-    log_path = "logs/fraud_alerts.csv"
-    if not os.path.isfile(log_path):
+def get_alerts(limit: int = Query(500, ge=1, le=10000)):
+    if not os.path.isfile(LOG_PATH):
         return {"alerts": [], "count": 0}
+    rows: list[dict] = []
+    with open(LOG_PATH) as f:
+        for row in csv.DictReader(f):
+            rows.append(row)
+    rows.reverse()  # most recent first
+    return {"alerts": rows[:limit], "count": len(rows)}
 
-    alerts = []
-    with open(log_path, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            alerts.append(row)
-
-    return {"alerts": alerts, "count": len(alerts)}
 
 @app.get("/stats")
 def get_stats():
-    log_path = "logs/fraud_alerts.csv"
-    fraud_count = 0
-
-    if os.path.isfile(log_path):
-        with open(log_path, "r") as f:
-            reader = csv.DictReader(f)
-            fraud_count = sum(1 for _ in reader)
-
-    total = feature_store.get_total_transactions() if hasattr(feature_store, "get_total_transactions") else "N/A"
+    with _lock:
+        total = feature_store.get_total_transactions()
+        avg_score = round(score_sum / total, 4) if total else None
+        rate = round(fraud_count / total, 4) if total else None
+        f_count = fraud_count
 
     return {
         "total_transactions": total,
-        "fraud_detected": fraud_count,
-        "fraud_rate": f"{(fraud_count / total * 100):.2f}%" if isinstance(total, int) and total > 0 else "N/A"
+        "fraud_detected": f_count,
+        "fraud_rate": rate,
+        "fraud_score_avg": avg_score,
+        "threshold": round(THRESHOLD, 4),
     }
+
+
+@app.get("/score-history")
+def get_score_history(limit: int = Query(200, ge=1, le=500)):
+    """Recent scores (fraud + non-fraud) for the dashboard time-series chart.
+    Snappier than /alerts because it's already in memory and includes non-fraud."""
+    with _lock:
+        items = list(score_history)
+    return {"history": items[-limit:]}

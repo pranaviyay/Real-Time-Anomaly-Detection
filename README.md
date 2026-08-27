@@ -1,5 +1,7 @@
 # Anomaly Detection — Real-Time Transaction Fraud System
 
+![tests](https://github.com/pranaviyay/Real-Time-Anomaly-Detection/actions/workflows/tests.yml/badge.svg)
+
 End-to-end real-time fraud detection. Transactions stream through Kafka, get scored by a calibrated gradient-boosted model using stateful per-user behavioural features, and flagged alerts appear live on a Streamlit dashboard.
 
 The design choice that drives the project: instead of training on raw transaction fields (amount, location, category alone), the system maintains an **in-memory rolling history per user** and derives 26 behavioural signals on every incoming transaction. The same feature store is used at training time and at inference time — no train/serve skew.

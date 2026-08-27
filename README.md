@@ -37,12 +37,12 @@ Computed on a stratified 20% test split that the model never sees during trainin
 
 | Metric                | Value  |
 |-----------------------|--------|
-| AUC-ROC               | **0.9516** |
-| Average precision (PR)| **0.8482** |
-| Precision (fraud)     | 0.5762 |
-| Recall (fraud)        | **0.8700** |
-| F1 (fraud)            | 0.6932 |
-| Decision threshold    | 0.1227 |
+| AUC-ROC               | **0.9589** |
+| Average precision (PR)| **0.8597** |
+| Precision (fraud)     | 0.7383 |
+| Recall (fraud)        | **0.7900** |
+| F1 (fraud)            | 0.7633 |
+| Decision threshold    | 0.2771 |
 
 The threshold is tuned on the validation set with **F-beta (β=2, recall-weighted)** under a precision floor of 0.30. In a fraud context, missing genuine fraud is much costlier than flagging a legitimate transaction for review, so recall is the primary objective.
 
@@ -122,7 +122,7 @@ Response:
   "fraud_score": 0.847,
   "is_fraud": 1,
   "flag": "FRAUD",
-  "threshold": 0.1227
+  "threshold": 0.2771
 }
 ```
 
@@ -136,7 +136,7 @@ Most-recent fraud alerts from `logs/fraud_alerts.csv`.
   "fraud_detected": 87,
   "fraud_rate": 0.0705,
   "fraud_score_avg": 0.7241,
-  "threshold": 0.1227
+  "threshold": 0.2771
 }
 ```
 
